@@ -47,6 +47,7 @@ target_compile_options(fnc_recomp PRIVATE ${FNC_RECOMP_OPTIONS})
 add_executable(fnc WIN32
     src/main.cpp
     src/fnc_hooks.cpp
+    src/fnc_movie.cpp
     src/fnc_sampler.cpp
     src/fnc_fps_overlay.cpp
     src/fnc_settings_menu.cpp

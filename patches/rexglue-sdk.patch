@@ -575,11 +575,69 @@ index a744375..0cd8599 100644
      }
    } while (!matched);
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..33c6186 100644
+index 19874a5..01cd3c2 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
-@@ -2903,6 +2903,31 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
- 
+@@ -10,6 +10,7 @@
+  */
+
+ #include <algorithm>
++#include <array>
+ #include <cstdarg>
+ #include <cstring>
+ #include <sstream>
+@@ -47,6 +48,9 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+                     "Submit command list when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+
++REXCVAR_DEFINE_BOOL(fnc_log_resolution, false, "GPU/D3D12",
++                    "Log guest, render and presentation dimensions when they change");
++
+ namespace rex::graphics::d3d12 {
+
+ // Generated with `xb buildshaders`.
+@@ -1985,6 +1989,39 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+
++  // The game hook reports actual movie-player state, including stop/skip.
++  bool fit_movie = rex::cvar::GetFlagByName("fnc_video_letterbox") == "true" &&
++                   rex::cvar::GetFlagByName("fnc_movie_active") == "true";
++  if (fit_movie) {
++    // Normalized ratio also marks this frame for uncropped movie presentation.
++    display_width = 16;
++    display_height = 9;
++  }
++  static thread_local bool was_fitting_movie = false;
++  if (fit_movie != was_fitting_movie) {
++    was_fitting_movie = fit_movie;
++    REXGPU_INFO("[FNC-VIDEO] presentation {} (aspect {}:{})",
++                fit_movie ? "movie fit" : "game restored", display_width, display_height);
++  }
++
++  if (REXCVAR_GET(fnc_log_resolution)) {
++    std::array<uint32_t, 12> dimensions = {
++        frontbuffer_width, frontbuffer_height,
++        frontbuffer_width_unscaled, frontbuffer_height_unscaled,
++        source_width_scaled, source_height_scaled,
++        guest_output_width, guest_output_height, display_width, display_height,
++        texture_cache_->draw_resolution_scale_x(), texture_cache_->draw_resolution_scale_y()};
++    static thread_local std::array<uint32_t, 12> last_dimensions{};
++    if (dimensions != last_dimensions) {
++      last_dimensions = dimensions;
++      REXGPU_INFO("[FNC-RES] packet={}x{}, source={}x{}, allocation={}x{}, active={}x{}, "
++                  "display={}x{}, scale={}x{}",
++                  dimensions[0], dimensions[1], dimensions[2], dimensions[3],
++                  dimensions[4], dimensions[5], dimensions[6], dimensions[7],
++                  dimensions[8], dimensions[9], dimensions[10], dimensions[11]);
++    }
++  }
++
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+       [this, &swap_texture_srv_desc, frontbuffer_format, swap_texture_resource, guest_output_width,
+@@ -2903,6 +2940,31 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+
    bool is_scaled = texture_cache_->IsDrawResolutionScaled();
    uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
 +  bool smart_delayed = false;
@@ -609,9 +667,9 @@ index 19874a5..33c6186 100644
 +  }
    ReadbackBuffer& rb = readback_buffers_[resolve_key];
    rb.last_used_frame = frame_current_;
- 
-@@ -3071,7 +3096,8 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
- 
+
+@@ -3071,7 +3133,8 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
    bool use_delayed_sync =
 -      readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
@@ -620,7 +678,7 @@ index 19874a5..33c6186 100644
    uint32_t read_index = write_index;
    if (use_delayed_sync) {
      read_index = 1 - write_index;
-@@ -3362,6 +3388,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -3362,6 +3425,12 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
      }
      EvictOldReadbackBuffers(readback_buffers_);
      EvictOldReadbackBuffers(memexport_readback_buffers_);
@@ -630,9 +688,9 @@ index 19874a5..33c6186 100644
 +        it = it->second.frame < tracker_floor ? readback_resolve_trackers_.erase(it) : std::next(it);
 +      }
 +    }
- 
+
      primitive_processor_->BeginFrame();
- 
+
 diff --git a/src/graphics/fnc_swap_counter.cpp b/src/graphics/fnc_swap_counter.cpp
 new file mode 100644
 index 0000000..23197c8
@@ -1207,3 +1265,118 @@ index f102b56..5e553eb 100644
 +    set(SDL_PIPEWIRE          ON  CACHE BOOL "")
 +    set(SDL_PIPEWIRE_SHARED   ON  CACHE BOOL "")
  endif()
+diff --git a/src/kernel/xam/xam_info.cpp b/src/kernel/xam/xam_info.cpp
+index 1fda053..33b7631 100644
+--- a/src/kernel/xam/xam_info.cpp
++++ b/src/kernel/xam/xam_info.cpp
+@@ -16,6 +16,7 @@
+ #include <rex/types.h>
+ #include <rex/string.h>
+ #include <rex/system/kernel_state.h>
++#include <rex/system/flags.h>
+ #include <rex/system/user_module.h>
+ #include <rex/system/xenumerator.h>
+ #include <rex/system/xthread.h>
+@@ -183,19 +184,13 @@ u32 XGetGameRegion_entry() {
+ }
+
+ u32 XGetLanguage_entry() {
+-  auto desired_language = XLanguage::kEnglish;
+-
+-  // Switch the language based on game region.
+-  // TODO(benvanik): pull from xex header.
+-  uint32_t game_region = XEX_REGION_NTSCU;
+-  if (game_region & XEX_REGION_NTSCU) {
+-    desired_language = XLanguage::kEnglish;
+-  } else if (game_region & XEX_REGION_NTSCJ) {
+-    desired_language = XLanguage::kJapanese;
++  // Match the configured console language exposed through ExGetXConfigSetting.
++  uint32_t language = REXCVAR_GET(user_language);
++  if (language > uint32_t(XLanguage::kInvalid) &&
++      language < uint32_t(XLanguage::kMaxLanguages)) {
++    return language;
+   }
+-  // Add more overrides?
+-
+-  return uint32_t(desired_language);
++  return uint32_t(XLanguage::kEnglish);
+ }
+
+ u32 XamGetCurrentTitleId_entry() {
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..c156d62 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -2408,6 +2408,21 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+   uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
+
++  // The game hook reports actual movie-player state, including stop/skip.
++  bool fit_movie = rex::cvar::GetFlagByName("fnc_video_letterbox") == "true" &&
++                   rex::cvar::GetFlagByName("fnc_movie_active") == "true";
++  if (fit_movie) {
++    // Normalized ratio also marks this frame for uncropped movie presentation.
++    display_width = 16;
++    display_height = 9;
++  }
++  static thread_local bool was_fitting_movie = false;
++  if (fit_movie != was_fitting_movie) {
++    was_fitting_movie = fit_movie;
++    REXGPU_INFO("[FNC-VIDEO] presentation {} (aspect {}:{})",
++                fit_movie ? "movie fit" : "game restored", display_width, display_height);
++  }
++
+   presenter->RefreshGuestOutput(
+       guest_output_width, guest_output_height, display_width, display_height,
+       [this, guest_output_width, guest_output_height, frontbuffer_format, swap_texture_view,
+diff --git a/src/ui/presenter.cpp b/src/ui/presenter.cpp
+index 7360ed9..2930d2d 100644
+--- a/src/ui/presenter.cpp
++++ b/src/ui/presenter.cpp
+@@ -898,6 +898,10 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+   // Final output location and dimensions.
+   // All host location calculations are DPI-independent, conceptually depending
+   // only on the aspect ratios, not the absolute values.
++  // FNC movie frames carry normalized 16:9; guest video modes use pixel sizes.
++  // Keep this property-based so a queued movie frame still fits after a stop event.
++  bool fit_movie = rex::cvar::GetFlagByName("fnc_video_letterbox") == "true" &&
++                   properties.display_aspect_ratio_x == 16 && properties.display_aspect_ratio_y == 9;
+   uint32_t output_width, output_height;
+   if (uint64_t(surface_width_in_paint_connection_) * properties.display_aspect_ratio_y >
+       uint64_t(surface_height_in_paint_connection_) * properties.display_aspect_ratio_x) {
+@@ -905,7 +909,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+     // ratio while stretching throughout the entire surface's width, then limit
+     // the Y cropping via letterboxing or stretching along X.
+     uint32_t present_safe_area;
+-    if (config.GetAllowOverscanCutoff() && REXCVAR_GET(present_safe_area_y) > 0 &&
++    if (!fit_movie && config.GetAllowOverscanCutoff() && REXCVAR_GET(present_safe_area_y) > 0 &&
+         REXCVAR_GET(present_safe_area_y) < 100) {
+       present_safe_area = uint32_t(REXCVAR_GET(present_safe_area_y));
+     } else {
+@@ -922,7 +926,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+       output_height = rescale_unsigned(surface_height_in_paint_connection_, 100, present_safe_area);
+       letterbox = true;
+     }
+-    if (letterbox && REXCVAR_GET(present_letterbox)) {
++    if (letterbox && (fit_movie || REXCVAR_GET(present_letterbox))) {
+       output_width = rescale_unsigned(surface_height_in_paint_connection_ * 100,
+                                       properties.display_aspect_ratio_x,
+                                       properties.display_aspect_ratio_y * present_safe_area);
+@@ -941,7 +945,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+     // aspect ratio while stretching throughout the entire surface's height,
+     // then limit the X cropping via letterboxing or stretching along Y.
+     uint32_t present_safe_area;
+-    if (config.GetAllowOverscanCutoff() && REXCVAR_GET(present_safe_area_x) > 0 &&
++    if (!fit_movie && config.GetAllowOverscanCutoff() && REXCVAR_GET(present_safe_area_x) > 0 &&
+         REXCVAR_GET(present_safe_area_x) < 100) {
+       present_safe_area = uint32_t(REXCVAR_GET(present_safe_area_x));
+     } else {
+@@ -957,7 +961,7 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
+       output_width = rescale_unsigned(surface_width_in_paint_connection_, 100, present_safe_area);
+       letterbox = true;
+     }
+-    if (letterbox && REXCVAR_GET(present_letterbox)) {
++    if (letterbox && (fit_movie || REXCVAR_GET(present_letterbox))) {
+       output_height = rescale_unsigned(surface_width_in_paint_connection_ * 100,
+                                        properties.display_aspect_ratio_y,
+                                        properties.display_aspect_ratio_x * present_safe_area);

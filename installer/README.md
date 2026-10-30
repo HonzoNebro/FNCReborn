@@ -6,7 +6,7 @@ the program nor the release contains game code.
 
 On Linux, Setup builds a Windows executable for WINE/Proton using a portable
 cross toolchain and a native host recompiler. This is not a native Linux game
-build. See [Linux development](../docs/LINUX_BUILDING.md) for validation.
+build. See [Linux development](../docs/LINUX_DEVELOPMENT.md) for validation.
 
 What it does:
 
@@ -54,7 +54,7 @@ FNC_BUILD_JOBS=2 ./installer/target/release/FNCReborn-Setup --sdk-only "$PWD" --
 ```
 
 Unset, zero or invalid values keep the automatic CPU/RAM-based limit.
-See [Linux development](../docs/LINUX_BUILDING.md) for local builds and
+See [Linux development](../docs/LINUX_DEVELOPMENT.md) for local builds and
 the Proton validation workflow.
 
 CI builds the program and attaches `FNCReborn-Setup.exe` to every published

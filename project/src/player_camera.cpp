@@ -20,6 +20,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "widescreen.h"
+
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ppc.h>
@@ -49,6 +51,10 @@ REXCVAR_DEFINE_DOUBLE(fnc_fp_up, 0.05, "Game", "First-person eye height offset (
 REXCVAR_DEFINE_DOUBLE(fnc_fp_aim_drop, 0.4, "Game", "Aim this far below the opponent's head (feet)");
 REXCVAR_DEFINE_DOUBLE(fnc_fp_smooth, 0.5, "Game", "Eye smoothing 0 (none) .. 0.95 (heavy)");
 REXCVAR_DEFINE_BOOL(fnc_fp_restore, true, "Game", "Restore the game camera before each camera update");
+REXCVAR_DEFINE_BOOL(fnc_log_camera_aspect, false, "Game",
+                    "Log camera aspect and FOV for widescreen diagnostics (requires fnc_fp_enable)");
+REXCVAR_DEFINE_DOUBLE(fnc_widescreen_aspect, 0.0, "Game",
+                      "Experimental 3D camera width/height ratio (0 off; wider than 16:9, up to 4)");
 
 namespace {
 
@@ -77,10 +83,32 @@ uint32_t g_cam_inner = 0;       // camera object asked for during the current di
 uint32_t g_cam = 0;             // camera object we last wrote
 uint8_t g_saved[kCamSaveSize];  // the game's own camera values from the last update
 bool g_written = false;
+bool g_wide_written = false;
 uint64_t g_update = 0;
 int g_mode = 0;  // 0 normal, 1 player camera
 V3 g_eye_smoothed{}, g_aim_smoothed{};
 bool g_eye_valid = false;
+
+void ApplyWidescreen(uint8_t* base, uint32_t cam) {
+  double target = REXCVAR_GET(fnc_widescreen_aspect);
+  if (!(target > 0.0)) return;
+  fnc_wide::Projection projection;
+  float old_aspect = RdF(base, cam + 0x08);
+  float old_fov = RdF(base, cam + 0x04);
+  if (!fnc_wide::Expand(target, old_aspect, old_fov, projection)) return;
+  // The normal camera has not been saved by the player-camera branch.
+  if (!g_written) std::memcpy(g_saved, base + cam, kCamSaveSize);
+  WrF(base, cam + 0x08, projection.inverse_aspect);
+  WrF(base, cam + 0x04, projection.horizontal_fov);
+  g_written = true;
+  g_wide_written = true;
+  static uint64_t last_log = 0;
+  if (!last_log || g_update - last_log >= 300) {
+    last_log = g_update;
+    REXLOG_INFO("[FNC-WIDE] camera {:08X}: H/W {} -> {}, horizontal FOV {} -> {}",
+                cam, old_aspect, projection.inverse_aspect, old_fov, projection.horizontal_fov);
+  }
+}
 
 struct BoxerSlot { std::atomic<uint32_t> obj{0}; std::atomic<uint64_t> seen{0}; };
 BoxerSlot g_boxer[2];
@@ -163,8 +191,10 @@ extern "C" void sub_8231DAB8(PPCContext& __restrict ctx, uint8_t* base) {
   }
 
   // Give the game its own camera back before it updates (keeps its smoothing/logic consistent).
-  if (g_written && g_cam && REXCVAR_GET(fnc_fp_restore)) std::memcpy(base + g_cam, g_saved, kCamSaveSize);
+  if (g_written && g_cam && (REXCVAR_GET(fnc_fp_restore) || g_wide_written))
+    std::memcpy(base + g_cam, g_saved, kCamSaveSize);
   g_written = false;
+  g_wide_written = false;
 
   g_cam_inner = 0;
   t_in_director = true;
@@ -174,7 +204,18 @@ extern "C" void sub_8231DAB8(PPCContext& __restrict ctx, uint8_t* base) {
   uint32_t cam = g_cam_inner;
   if (cam < 0x30000000u || cam >= 0xC0000000u) return;
   g_cam = cam;
-  if (g_mode == 0) return;
+  if (REXCVAR_GET(fnc_log_camera_aspect)) {
+    static uint64_t last_aspect_log = 0;
+    if (!last_aspect_log || g_update - last_aspect_log >= 300) {
+      last_aspect_log = g_update;
+      REXLOG_INFO("[FNC-ASPECT] camera {:08X}: aspect={}, fov={}",
+                  cam, RdF(base, cam + 0x08), RdF(base, cam + 0x04));
+    }
+  }
+  if (g_mode == 0) {
+    ApplyWidescreen(base, cam);
+    return;
+  }
 
   // Your boxer = lower address (fnc_view_boxer = 0) or the higher one; both must be seen recently.
   uint32_t o0 = g_boxer[0].obj.load(), o1 = g_boxer[1].obj.load();
@@ -230,6 +271,7 @@ extern "C" void sub_8231DAB8(PPCContext& __restrict ctx, uint8_t* base) {
   WrV(base, cam + 0x40, eye);
   WrF(base, cam + 0x50, Len(aim - eye));
   g_written = true;
+  ApplyWidescreen(base, cam);
 
   static uint64_t last_log = 0;
   if (g_update - last_log > 600) {
